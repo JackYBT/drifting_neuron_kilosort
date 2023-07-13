@@ -66,7 +66,7 @@ def extract_single_neuron_spike_times_for_specific_trial(raw_spike_data_path, ne
 
     adjustedNeuronSpikeTime = extract_single_neuron_spike_times_between_specific_times(raw_spike_data_path, neuron_identity_data_path, cue_time[trialNum] + TIME_BEFORE_CUE, cue_time[trialNum] + TIME_AFTER_CUE, neuronId)
 
-    # print("adjustedNeuronSpikeTime (6 seconds around cue time): ", adjustedNeuronSpikeTime)
+    print("adjustedNeuronSpikeTime (6 seconds around cue time): ", adjustedNeuronSpikeTime)
     # print("*"*100)
     # A list of times of the specified neuron firing time for the specified trial, which is defined as around 3 seconds of the cue time
     return adjustedNeuronSpikeTime, cue_time[trialNum]
@@ -129,8 +129,8 @@ def extract_trial_time_info(mat_file_path):
     # Return the beginning trial time and the cue time as a tuple
     return beginning_trial_time,cue_time
 
-def upscale_list(numbers, scale_factor):
-    return [num * scale_factor for num in numbers]
+def upscale_list(numbers, cue, scale_factor):
+    return [(num - cue) * scale_factor for num in numbers]
 
 def plot_single_neuron_spikes_between_times(spike_time, neuronId, t0, t1, trialNum = None):
     print("spike_time", spike_time)
@@ -140,7 +140,7 @@ def plot_single_neuron_spikes_between_times(spike_time, neuronId, t0, t1, trialN
 
     assert np.all((t0 < np.asarray(spike_time)) & (np.asarray(spike_time) < t1)), "All spike times should be between t0 and t1"    
     # spike_time = upscale_list(spike_time, 1000) - cue*1000 # Convert spike time from seconds to milliseconds, and center around cue
-    spike_time = upscale_list(spike_time - cue, 1000)
+    spike_time = upscale_list(spike_time, cue, 1000)
     plt.vlines(spike_time, 0, 1, colors='k')
     plt.axvline(x=0, color='r', label = 'Go Cue')
     plt.legend()
