@@ -58,6 +58,8 @@ def getDataAndPlot(file_path, tStart, tEnd, peakChannel, trialNum = None, dataTy
     tDat = np.arange(firstSamp, lastSamp+1)
     tDat = 1000*tDat/sRate      # plot time axis in msec
 
+    tDat = tDat - tDat[0] - 3000       # set t=-3 at start of plot
+
     rawData = makeMemMapRaw(binFullPath, meta)
 
     if dataType == 'A':
