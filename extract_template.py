@@ -106,6 +106,10 @@ def convert_dot_product_to_spike_count_univariate(univariate_data, utilized_Chan
     spike_count_per_bin = []
     for bin in range(univariate_data.shape[0]):
         #TODO: I originally did if np.mean(univariate_data[bin][utilized_Channels]) > threshold, and it performed much better than the current implementation
+        # if (np.mean(univariate_data[bin][utilized_Channels]) > threshold):
+        #     spike_count_per_bin.append(1)
+        # else:
+        #     spike_count_per_bin.append(0)
         if all(i > threshold for i in univariate_data[bin][utilized_Channels]):
             spike_count_per_bin.append(1)
             # print("bin", bin, "mean", np.mean(univariate_data[bin][utilized_Channels]))
@@ -393,6 +397,7 @@ def main():
     print('Multivariate Pearson correlation coefficient: ', scipy.stats.pearsonr(multivariate_bin_fr, kilosort_bin_fr)[0])
     print('univariate kilosort correlation druckmann equation:', druckmann_correlation_calculation(univariate_recovered_spike, kilosort_computed_spike_time))
     print('multivariate kilosort correlation druckmann equation:', druckmann_correlation_calculation(multivariate_recovered_spike, kilosort_computed_spike_time))
+
 
 
 # threshold_results, pearson_corr_threshold = find_optimal_threshold(list_of_threshold, list_of_neuron_id, list_of_trial_num, raw_spike_data_path, neuron_identity_data_path, trial_time_info_path, voltage_data_path, template_used_data_path, TIME_BEFORE_CUE, TIME_AFTER_CUE, bin_width, stride)
