@@ -6,7 +6,7 @@ from raw_voltage_helpers import *
 
 #365,complete_session,217,3.748408074946122,0.6318257956448912,0.3296482412060302,0.3163613029160173,0.22574243375185418,-0.024029346793889073,108.99356122432809,165.0,0.0784876764776263,0.6540639706468853
 
-def extractPeakChannel(neuronId, filename = "imec2_ks2/waveform_metrics.csv"):
+def extractPeakChannel(neuronId, filename = "imec1_ks2/waveform_metrics.csv"):
     if os.path.isfile(filename):
         df = pd.read_csv(filename)
         df = df[df['cluster_id'] == neuronId]
@@ -14,7 +14,8 @@ def extractPeakChannel(neuronId, filename = "imec2_ks2/waveform_metrics.csv"):
     else:
         print(f"No such file found at path: {filename}")
         return None
-def getMaxChannelNumber(filename = "imec2_ks2/waveform_metrics.csv"):
+
+def getMaxChannelNumber(filename = "imec1_ks2/waveform_metrics.csv"):
     if os.path.isfile(filename):
         df = pd.read_csv(filename)
         return np.max(df['peak_channel'].values)
@@ -22,34 +23,8 @@ def getMaxChannelNumber(filename = "imec2_ks2/waveform_metrics.csv"):
         print(f"No such file found at path: {filename}")
         return None
 
-# def extractRawVoltage(neuronId, filename = "./raw_data.bin"):
-#     #Assuming number of channels is the largest channel number
-#     numberOfChannels = getMaxChannelNumber() + 1 #+1 because it starts at 0
-#     print("maxChannelNumber", numberOfChannels - 1)
 
-#     peakChannel = extractPeakChannel(neuronId)
-
-#     voltage_raw_data = read_bin_file("./raw_data.bin", 0, 385 * 384 * 2, np.int16)
-
-#     print(voltage_raw_data.shape)
-#     print(voltage_raw_data[peakChannel])
-
-#     numbers = [num for num in range(0, 385 * 384 * 2, 2) if num % numberOfChannels == peakChannel]
-#     for i in numbers:
-#         print(voltage_raw_data[i])
-
-#     print(peakChannel)
-
-# def read_bin_file(file_path, offset, count, dtype):
-#     with open(file_path, 'rb') as file:
-#         file.seek(offset)
-#         part_of_file = np.fromfile(file, dtype=dtype, count=count)
-#     return part_of_file
-
-# extractRawVoltage(365)
-
-
-def getDataAndPlot(file_path, tStart, tEnd, peakChannel, dataType='A', dw=0, dLineList=[0, 1, 6]):
+def getDataAndPlot(file_path, tStart, tEnd, peakChannel, trialNum = None, dataType='A', dw=0, dLineList=[0, 1, 6], plot=True, allChannels=False):
     #tStart, tEnd is in seconds
     binFullPath = Path(file_path)
 
@@ -58,7 +33,11 @@ def getDataAndPlot(file_path, tStart, tEnd, peakChannel, dataType='A', dw=0, dLi
 
     # For analog channels: zero-based index of a channel to extract,
     # gain correct and plot (plots first channel only)
-    chanList = [peakChannel - 5, peakChannel - 4, peakChannel - 3, peakChannel - 2, peakChannel - 1, peakChannel, peakChannel + 1, peakChannel + 2, peakChannel + 3, peakChannel + 4, peakChannel + 5]
+    if not allChannels:
+        chanList = [peakChannel + i for i in range(-5,6)]
+    else:
+        chanList = list(range(383))
+
 
     # For a digital channel: zero based index of the digital word in
     # the saved file. For imec data there is never more than one digital word.
@@ -84,6 +63,8 @@ def getDataAndPlot(file_path, tStart, tEnd, peakChannel, dataType='A', dw=0, dLi
     if dataType == 'A':
         #I think the second index is time
         selectData = rawData[chanList, firstSamp:lastSamp+1]
+        # print("raw_data.shape, which is total number of samples", rawData.shape[1])
+        # print("sampling rate", sRate)
         if meta['typeThis'] == 'imec':
             # apply gain correction and convert to uV
             print("unit is uV")
@@ -97,6 +78,8 @@ def getDataAndPlot(file_path, tStart, tEnd, peakChannel, dataType='A', dw=0, dLi
 
         # Plot the first of the extracted channels
         print("ConvData", convData.shape)
+        if not plot:
+            return convData
         fig, axs = plt.subplots(4, 3, figsize=(15,10))
 
         for i in range(11):
@@ -106,8 +89,11 @@ def getDataAndPlot(file_path, tStart, tEnd, peakChannel, dataType='A', dw=0, dLi
             axs[row, col].plot(tDat, convData[i, :])
             axs[row, col].set_xlabel('(ms)')
             axs[row, col].set_ylabel('(uV)')
-
+    
+        axs[3,2].set_title(r"$\bf{Trial\ Number:}$" + str(trialNum) if trialNum else "")
+        print("trialnum", trialNum)
         plt.tight_layout()
+
         plt.show()
     else:
         digArray = ExtractDigital(rawData, firstSamp, lastSamp, dw,
@@ -123,6 +109,6 @@ def getDataAndPlot(file_path, tStart, tEnd, peakChannel, dataType='A', dw=0, dLi
 def main():
     BEGIN_TIME = 0
     END_TIME = 10
-    peakChannel = extractPeakChannel(365, "imec2_ks2/waveform_metrics.csv")
+    peakChannel = extractPeakChannel(365, "imec1_ks2/waveform_metrics.csv")
     getDataAndPlot("./NL_NL106_20221103_session1_g0_tcat.imec1.ap.bin", BEGIN_TIME, END_TIME, peakChannel)
-    
+
