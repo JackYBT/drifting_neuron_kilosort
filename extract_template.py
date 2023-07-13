@@ -150,9 +150,9 @@ def plot_uni_multivariate_spike_count_per_trial(spike_count_per_bin, NEURON_ID, 
     plt.ylabel('Spike Count') 
     plt.xlabel('seconds')
     if multivariate:
-        title = f'Multivariate Recovered Spike Count for{NEURON_ID} Trial ' + str(trialNum) + f' threshold:{threshold}'
+        title = f'Multivariate Recovered NEURON: {NEURON_ID} Trial ' + str(trialNum) + f' threshold:{threshold}'
     else:
-        title = f'Univariate Recovered Spike Count for{NEURON_ID} Trial ' + str(trialNum) + f' threshold:{threshold}'
+        title = f'Univariate Recovered NEURON: {NEURON_ID} Trial ' + str(trialNum) + f' threshold:{threshold}'
     plt.title(title)
     plt.show()
 
