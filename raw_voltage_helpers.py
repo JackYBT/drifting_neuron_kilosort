@@ -33,7 +33,7 @@ from tkinter import filedialog
 def readMeta(binFullPath):
     metaName = binFullPath.stem + ".meta"
     metaPath = Path(binFullPath.parent / metaName)
-    print("Constructed metapath", metaPath)
+    # print("Constructed metapath", metaPath)
     metaDict = {}
     if metaPath.exists():
         # print("meta file present")

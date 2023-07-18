@@ -23,6 +23,65 @@ def getMaxChannelNumber(filename = "imec1_ks2/waveform_metrics.csv"):
         print(f"No such file found at path: {filename}")
         return None
 
+def getMultipleTrialVoltage(listOfDesiredTrials, listOfCueTimes, file_path, peakChannel, dataType='A', allChannels=True):
+    #tStart, tEnd is in seconds
+    print("filepath is: ", file_path)
+    binFullPath = Path(file_path)
+
+    # Other parameters about what data to read
+    dataType = 'A'    # 'A' for analog, 'D' for digital data
+
+    # For analog channels: zero-based index of a channel to extract,
+    # gain correct and plot (plots first channel only)
+    if allChannels:
+        chanList = list(range(383))
+    else:
+        chanList = [peakChannel + i for i in range(-5,6)]
+
+    tStart = []
+    tEnd = []
+
+    #Creating a the times for when all the data you want.
+    for trial in listOfDesiredTrials:
+        tStart.append(listOfCueTimes[trial] - 3)
+        tEnd.append(listOfCueTimes[trial] + 3)
+
+    # Read in metadata; returns a dictionary with string for values
+    meta = readMeta(binFullPath)
+
+    # parameters common to NI and imec data
+    sRate = SampRate(meta)
+    rawData = makeMemMapRaw(binFullPath, meta)
+
+    listOfVoltageByTrial = []
+
+    for idx in range(len(tStart)):
+        firstSamp = int(sRate*tStart[idx])
+        lastSamp = int(sRate*tEnd[idx])
+        # array of times for plot
+        tDat = np.arange(firstSamp, lastSamp+1)
+        tDat = 1000*tDat/sRate      # plot time axis in msec
+
+        tDat = tDat - tDat[0] - 3000       # set t=-3 at start of plot
+
+        if dataType == 'A':
+            #I think the second index is time
+            selectData = rawData[chanList, firstSamp:lastSamp+1]
+
+            if meta['typeThis'] == 'imec':
+                # apply gain correction and convert to uV
+                print("unit is uV")
+                convData = 1e6*GainCorrectIM(selectData, chanList, meta)
+            else:
+                MN, MA, XA, DW = ChannelCountsNI(meta)
+                print("NI channel counts: %d, %d, %d, %d" % (MN, MA, XA, DW))
+                print("unit is mV")
+                # apply gain correction and convert to mV
+                convData = 1e3*GainCorrectNI(selectData, chanList, meta)
+
+        listOfVoltageByTrial.append(convData)
+    return np.array(listOfVoltageByTrial)
+
 
 def getDataAndPlot(file_path, tStart, tEnd, peakChannel, trialNum = None, dataType='A', dw=0, dLineList=[0, 1, 6], plot=True, allChannels=False):
     #tStart, tEnd is in seconds
@@ -33,10 +92,10 @@ def getDataAndPlot(file_path, tStart, tEnd, peakChannel, trialNum = None, dataTy
 
     # For analog channels: zero-based index of a channel to extract,
     # gain correct and plot (plots first channel only)
-    if not allChannels:
-        chanList = [peakChannel + i for i in range(-5,6)]
-    else:
+    if allChannels:
         chanList = list(range(383))
+    else:
+        chanList = [peakChannel + i for i in range(-5,6)]
 
 
     # For a digital channel: zero based index of the digital word in
