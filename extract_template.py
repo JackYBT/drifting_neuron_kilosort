@@ -429,27 +429,114 @@ def plot_averaged_voltage_for_selected_trials(config):
         f"Averaged Voltage across Utilized Channel for neuron{config['NEURON_ID']}")
     plt.tight_layout()
     plt.show()
-    # fig, ax = plt.subplots(figsize=(10, 6))
 
-    # for i, trial_idx in enumerate(selected_trials_spikes_fr_voltage):
-    #     raw_voltage = np.array(
-    #         selected_trials_spikes_fr_voltage[trial_idx]['raw_voltage'])
-    #     # should be (num_channels, num_samples for 6 seconds)
 
-    #     # should have shape (32, num_samples for 6 seconds)
-    #     selected_channels_voltage = raw_voltage[utilized_channels]
-    #     averaged_channels_voltage = np.mean(
-    #         selected_channels_voltage, axis=0).squeeze()
+def get_voltage_stats(config):
+    selected_trials_spikes_fr_voltage = config['selected_trials_spikes_fr_voltage']
+    # Identifying the utilized_channels
+    cur_template = extract_template(
+        template_used_data_path=config["template_used_data_path"], templateId=config["NEURON_ID"])
+    utilized_channels = np.array(return_utilized_channels(cur_template))
 
-    #     print("averaged_channels_voltage.shape",
-    #           averaged_channels_voltage.shape)
-    #     time = np.arange(len(averaged_channels_voltage))
-    #     ax.plot(time, averaged_channels_voltage, label='Voltage time-series')
-    # ax.title('Voltage vs Time')
-    # ax.xlabel('Time')
-    # ax.ylabel('Voltage')
-    # ax.legend()
-    # plt.show()
+    result = {}
+    for idx, trial_idx in enumerate(selected_trials_spikes_fr_voltage):
+        raw_voltage = np.array(
+            selected_trials_spikes_fr_voltage[trial_idx]['raw_voltage'])
+
+        selected_channels_voltage = raw_voltage[utilized_channels]
+        averaged_channels_voltage = np.mean(
+            selected_channels_voltage, axis=0).squeeze()
+        average = np.mean(averaged_channels_voltage)
+        std = np.std(averaged_channels_voltage)
+
+        result[trial_idx] = {
+            "average": average,
+            "std": std,
+            "max": np.max(averaged_channels_voltage),
+            "min": np.min(averaged_channels_voltage)
+        }
+        num_outliers = len([i for i in averaged_channels_voltage if (
+            i > average + 3 * std) or (i < average - 3 * std)])
+        result[trial_idx]["num_outliers"] = num_outliers
+    return result
+
+
+def plot_voltage_stats(config):
+    # List of channels
+    voltage_stats = config['voltage_stats']
+    trials = list(voltage_stats.keys())
+    positions = list(range(len(trials)))
+
+    # Lists of metrics
+    averages = [voltage_stats[trial]['average'] for trial in trials]
+    std_devs = [voltage_stats[trial]['std'] for trial in trials]
+    max_vals = [voltage_stats[trial]['max'] for trial in trials]
+    min_vals = [voltage_stats[trial]['min'] for trial in trials]
+    num_outliers = [voltage_stats[trial]['num_outliers'] for trial in trials]
+
+    # Create a figure and a set of subplots
+    fig, axs = plt.subplots(5, figsize=(5, 10))
+
+    # Plot the data
+    axs[0].bar(positions, averages, color='blue')
+    axs[0].set_title('Average')
+    axs[0].set_ylabel('Value')
+    axs[0].set_xticks(positions)
+    axs[0].set_xticklabels(trials, rotation='vertical')
+
+    axs[1].bar(positions, std_devs, color='orange')
+    axs[1].set_title('Standard Deviation')
+    axs[1].set_ylabel('Value')
+    axs[1].set_xticks(positions)
+    axs[1].set_xticklabels(trials, rotation='vertical')
+
+    axs[2].bar(positions, max_vals, color='green')
+    axs[2].set_title('Maximum Values')
+    axs[2].set_ylabel('Value')
+    axs[2].set_xticks(positions)
+    axs[2].set_xticklabels(trials, rotation='vertical')
+
+    axs[3].bar(positions, min_vals, color='red')
+    axs[3].set_title('Minimum Values')
+    axs[3].set_ylabel('Value')
+    axs[3].set_xticks(positions)
+    axs[3].set_xticklabels(trials, rotation='vertical')
+
+    axs[4].bar(positions, num_outliers, color='purple')
+    axs[4].set_title('Outliers')
+    axs[4].set_ylabel('Value')
+    axs[4].set_xticks(positions)
+    axs[4].set_xticklabels(trials, rotation='vertical')
+
+    # Display the plot
+    fig.suptitle(
+        f'Voltage Stats for utilized Channels of neuron{config["NEURON_ID"]} {config["desired_trial_type_name"]}')
+    # plt.subplots_adjust(bottom=0.1, top=0.4)
+    plt.show()
+
+
+def heatmap_univariate(config):
+    n = len(config["selected_trials"])  # number of subfigures
+    fig, axs = plt.subplots(1, n, figsize=(n*3, 3))
+
+    for ax, trial_idx in zip(axs, config["selected_trials"]):
+        # shape should be (num_time_bins for 6 seconds, num_channels)
+        univariate_projection = config["selected_trials_spikes_fr_voltage"][trial_idx]["univariate_projection"]
+
+        # Identifying the utilized_channels
+        cur_template = extract_template(
+            template_used_data_path=config["template_used_data_path"], templateId=config["NEURON_ID"])
+        utilized_channels = np.array(return_utilized_channels(cur_template))
+        univariate_projection = univariate_projection[:, utilized_channels].transpose(
+        )
+
+        img = ax.imshow(univariate_projection,
+                        interpolation='nearest', aspect='auto', cmap='seismic')
+        fig.colorbar(img, ax=ax)
+        ax.set_title(f'{trial_idx}')
+
+    plt.tight_layout()
+    plt.show()
 
 
 def main():
@@ -457,11 +544,11 @@ def main():
     # sampling rate is 30000 Hz
     config = {
         'NEURON_ID': 274,
-        'threshold': 0.06,
+        'threshold': 0.1,
         'bin_width': 0.01,
         'stride': 0.01,
         'save_folder_path': "./neuron_365/",
-        'selected_trials': [152, 153, 169],
+        'selected_trials': [152, 169],
         'raw_spike_data_path': 'imec1_ks2/spike_times_sec_adj.npy',
         'neuron_identity_data_path': 'imec1_ks2/spike_clusters.npy',
         'raw_voltage_data_path': "./NL_NL106_20221103_session1_g0_tcat.imec1.ap.bin",
@@ -476,11 +563,11 @@ def main():
         'trialNum': 152,
         'optogenetic_desired_trial_type': 0,  # no optogenetic stimulation
         'lick_direction_desired_trial_type': 1,  # 0 left lick, 1 right lick
-        'desired_trial_type_name': 'no optogenetic stimulation + 1 (assuming right lick)'
     }
+    config['desired_trial_type_name'] = f'optogenetic stimulation type (f{config["optogenetic_desired_trial_type"]}) + lick direction ({config["lick_direction_desired_trial_type"]}) threshold {config["threshold"]}'
     config['template_id'] = config['NEURON_ID']
     config['peakChannel'] = extractPeakChannel(config['NEURON_ID'])
-    config['selected_trials'] = generate_desired_trials(config)
+    config['selected_trials'] = generate_desired_trials(config)[-6:]
     # additional_trials = list(range(200, 210))
     # config['selected_trials'] = np.sort(np.concatenate(
     #     (config['selected_trials'], additional_trials)))  # add 10 more trials that drifted
@@ -494,9 +581,17 @@ def main():
 
     config["selected_trials_spikes_fr_voltage"] = get_uni_multi_kilosort_spikes_across_selected_trials(
         config)
-    plot_spikes_for_selected_trials(config)
-    plot_averaged_voltage_for_selected_trials(config)
+    # print("uni", config["selected_trials_spikes_fr_voltage"]
+    #       [152]["univariate_projection"].shape)
+    # print("multi", config["selected_trials_spikes_fr_voltage"]
+    #       [152]["multivariate_projection"].shape)
+    heatmap_univariate(config)
 
+    # plot_spikes_for_selected_trials(config)
+    # plot_averaged_voltage_for_selected_trials(config)
+    # config["voltage_stats"] = get_voltage_stats(config)
+    # print(config["voltage_stats"])
+    # plot_voltage_stats(config)
     # print("result.keys()", result.keys())
     # print("result['univariate_spike_time'].shape",
     #       result[result.keys[0]]['univariate_spike_time'].shape)

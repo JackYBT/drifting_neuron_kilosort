@@ -250,13 +250,13 @@ def get_uni_multi_kilosort_spikes_across_selected_trials(config):
     # 3. Use the raw_voltage and templates to calculate univariate and multivariate spike times
     univariate_projection = multiple_trial_univariate(
         raw_voltage_for_desired_trials, cur_template)
-    multi_variate_projection = multiple_trial_multivariate(
+    multivariate_projection = multiple_trial_multivariate(
         raw_voltage_for_desired_trials, cur_template, utilized_channels)
 
     univariate_spike_time = convert_dot_product_to_spike_count_univariate_multiple_trials(
         univariate_projection, utilized_channels, threshold)
     multi_variate_spike_time = convert_dot_product_to_spike_count_multivariate_multiple_trials(
-        multi_variate_projection, utilized_channels, threshold)
+        multivariate_projection, utilized_channels, threshold)
 
     # plot_uni_multi_kilosort_spikes_across_all_trials(
     #     listOfDesiredTrials[0], univariate_spike_time, multi_variate_spike_time, final_kilosort_spike_time, NEURON_ID, threshold)
@@ -275,7 +275,9 @@ def get_uni_multi_kilosort_spikes_across_selected_trials(config):
     for idx, trialNum in enumerate(listOfDesiredTrials):
         result[trialNum] = {
             "univariate_spike_time": univariate_spike_time[idx],
+            "univariate_projection": univariate_projection[idx],
             "multivariate_spike_time": multi_variate_spike_time[idx],
+            "multivariate_projection": multivariate_projection[idx],
             "kilosort_spike_time": final_kilosort_spike_time[idx],
             "univariate_fr": univariate_fr[idx],
             "multi_variate_fr": multi_variate_fr[idx],
