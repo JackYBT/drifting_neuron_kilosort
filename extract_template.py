@@ -12,6 +12,11 @@ import neo
 import quantities as pq
 from elephant.spike_train_correlation import spike_time_tiling_coefficient
 from uni_multi_variate_helpers import *
+import seaborn as sns
+import pickle
+import pywt
+from scipy.stats import pearsonr
+from sklearn.cross_decomposition import CCA
 
 
 def return_utilized_channels(template):
@@ -77,6 +82,20 @@ def plot_recovered_spike_against_kilosort_single_trial(computed_spike, kilosort_
     if save_folder_path:
         plt.savefig(os.path.join(save_folder_path, title + ".png"))
     plt.show()
+
+
+def convert_spike_time_to_time_bin_count(config):
+    kilosort_spike_time = config['selected_trials_spikes_fr_voltage'][70]['kilosort_spike_time']
+    kilosort_spike_time = [(config['TIME_AFTER_CUE']+n) /
+                           (2*config['TIME_AFTER_CUE'])for n in kilosort_spike_time]
+
+    time_bins = np.zeros(
+        len(config['univariate_projection_stats'][70]['denoised_projection']))
+
+    for spike_time in kilosort_spike_time:
+        bin_index = int(spike_time * len(time_bins))
+        time_bins[bin_index] += 1
+    return time_bins
 
 
 def convert_spike_time_to_fr(spikeTimes, config, rate=True):
@@ -335,17 +354,21 @@ def plot_drift_special(NEURON_ID, peakChannel, template_id, threshold):
 def generate_desired_trials(config):
     '''Generate the desired trial index based on the desired optogenetics and lick direction type'''
     # open the optogenetic stimualtion trial type file
-    matFile = loadmat(config['trial_type_path'])
-    optogenetic_trial_type = matFile['SessionData'][0, 0]["StimTypes"][0]
+    with open(config['optogenetic_stim_type_path'], 'rb') as handle:
+        stim_file = pickle.load(handle)
     optogenetic_desired_trial_type = config['optogenetic_desired_trial_type']
-    optogenetic_desired_trial_idx = np.where(
-        optogenetic_trial_type == optogenetic_desired_trial_type)[0]
 
-    print("optogenetic_trial_type", optogenetic_trial_type)
-    print("total length of optogenetic_trial_type", len(optogenetic_trial_type))
-    print("number of trials with no stimulation",
-          np.where(optogenetic_trial_type == 0)[0].shape)
+    print("stim_file", type(stim_file))
+    if optogenetic_desired_trial_type == 0:
+        optogenetic_desired_trial_idx = stim_file["no-stim"]
+    else:
+        optogenetic_desired_trial_idx = stim_file["stim"]
 
+    print("optogenetic_trial_type", optogenetic_desired_trial_type)
+    print("total length of optogenetic_trial_type",
+          len(optogenetic_desired_trial_idx))
+
+    matFile = scipy.io.loadmat(config['trial_type_path'])
     # open the lick direction trial type file
     lick_direction_trial_type = matFile['SessionData'][0, 0]["TrialTypes"][0]
     # TODO: Not sure if 0 is left lick or right lick, but assuming left lick
@@ -356,7 +379,10 @@ def generate_desired_trials(config):
     desired_trial_idx = np.intersect1d(
         optogenetic_desired_trial_idx, lick_direction_desired_trial_idx)
 
-    return desired_trial_idx
+    if config['random_sample_number'] is not None and config['random_sample_number'] < len(desired_trial_idx):
+        desired_trial_idx = np.random.choice(
+            desired_trial_idx, config['random_sample_number'], replace=False)
+    return np.sort(desired_trial_idx)
 
 
 def plot_spikes_for_selected_trials(config):
@@ -443,12 +469,19 @@ def get_voltage_stats(config):
         raw_voltage = np.array(
             selected_trials_spikes_fr_voltage[trial_idx]['raw_voltage'])
 
+        # Shape (32, num_bins_in_6_seconds)
         selected_channels_voltage = raw_voltage[utilized_channels]
         averaged_channels_voltage = np.mean(
-            selected_channels_voltage, axis=0).squeeze()
+            selected_channels_voltage, axis=0).squeeze()  # average over all channels of a timebin, but i lose information on variability within the channels
+
+        # average over all timebins of a trial (This tells us )
         average = np.mean(averaged_channels_voltage)
         std = np.std(averaged_channels_voltage)
-
+        # If i am losing spikes, I must be losing spikes in the same timebin across 32 channels all at once
+        # The hypothesis is that, because kilosort is summing over all template X Channel dot products, if there are a
+        # few outlier negative channels that are very negative, that will bring the overall summation down.
+        # To identify that, you would need to look at, whether there is a big difference between the summation of just the positive numbers, the summation of
+        # All the numbers, for trials that drifted and didn't drift
         result[trial_idx] = {
             "average": average,
             "std": std,
@@ -457,6 +490,7 @@ def get_voltage_stats(config):
         }
         num_outliers = len([i for i in averaged_channels_voltage if (
             i > average + 3 * std) or (i < average - 3 * std)])
+
         result[trial_idx]["num_outliers"] = num_outliers
     return result
 
@@ -515,10 +549,83 @@ def plot_voltage_stats(config):
     plt.show()
 
 
+def get_univariate_projection_stats(config):
+
+    result = {}
+    for trial_idx in config["selected_trials"]:
+        result[trial_idx] = {}
+
+        # Should be shape (num_time_bins for 6 seconds, num_channels)
+        univariate_projection = config["selected_trials_spikes_fr_voltage"][trial_idx]["univariate_projection"]
+
+        # Identifying the utilized_channels
+        cur_template = extract_template(
+            template_used_data_path=config["template_used_data_path"], templateId=config["NEURON_ID"])
+        utilized_channels = np.array(return_utilized_channels(cur_template))
+
+        # Shape (num_time_bins for 6 seconds, num_utilized_channels)
+        selected_univariate_projection = univariate_projection[:,
+                                                               utilized_channels]
+
+        positive_sum_per_trial = 0
+        negative_sum_per_trial = 0
+        for time_bin in selected_univariate_projection:
+            # Iterating over each time bin, and calculating the summation of all the positive numbers
+            for channel in time_bin:
+                if channel > 0:
+                    positive_sum_per_trial += channel
+                else:
+                    negative_sum_per_trial += channel
+        result[trial_idx]['positive_sum'] = positive_sum_per_trial
+        result[trial_idx]['negative_sum'] = negative_sum_per_trial
+
+        summation_univariate_projection = np.sum(univariate_projection, axis=1)
+        denoised_summation = pywt.threshold(summation_univariate_projection, value=np.std(
+            summation_univariate_projection), mode='soft')
+        result[trial_idx]['denoised_projection'] = denoised_summation
+        result[trial_idx]['summation_univariate_projection'] = summation_univariate_projection
+
+    return result
+
+
+def plot_univariate_projection_stats(config):
+
+    # List of channels
+    univariate_projection_stats = config['univariate_projection_stats']
+    trials = list(univariate_projection_stats.keys())
+    positions = list(range(len(trials)))
+
+    # Lists of metrics
+    positive_sum = [univariate_projection_stats[trial]
+                    ['positive_sum'] for trial in trials]
+    negative_sum = [univariate_projection_stats[trial]
+                    ['negative_sum'] for trial in trials]
+
+    # Create a figure and a set of subplots
+    fig, axs = plt.subplots(2, figsize=(5, 10))
+
+    # Plot the data
+    axs[0].bar(positions, positive_sum, color='blue')
+    axs[0].set_title('Positive Sum of all the positive projection values')
+    axs[0].set_ylabel('Value')
+    axs[0].set_xticks(positions)
+    axs[0].set_xticklabels(trials, rotation='vertical')
+
+    axs[1].bar(positions, negative_sum, color='orange')
+    axs[1].set_title('Negative Sum of all the positive projection values')
+    axs[1].set_ylabel('Value')
+    axs[1].set_xticks(positions)
+    axs[1].set_xticklabels(trials, rotation='vertical')
+
+    fig.suptitle(f'{config["NEURON_ID"]} {config["desired_trial_type_name"]}')
+    plt.show()
+
+
 def heatmap_univariate(config):
     n = len(config["selected_trials"])  # number of subfigures
-    fig, axs = plt.subplots(1, n, figsize=(n*3, 3))
+    fig, axs = plt.subplots(n, 1, figsize=(3, n*3))
 
+    summation_heatmap_univariate = {}
     for ax, trial_idx in zip(axs, config["selected_trials"]):
         # shape should be (num_time_bins for 6 seconds, num_channels)
         univariate_projection = config["selected_trials_spikes_fr_voltage"][trial_idx]["univariate_projection"]
@@ -530,9 +637,27 @@ def heatmap_univariate(config):
         univariate_projection = univariate_projection[:, utilized_channels].transpose(
         )
 
+        summation_univariate_projection = np.sum(univariate_projection, axis=0)
+        denoised_summation = pywt.threshold(summation_univariate_projection, value=np.std(
+            summation_univariate_projection), mode='soft')
+        summation_heatmap_univariate[trial_idx] = denoised_summation
+
         img = ax.imshow(univariate_projection,
                         interpolation='nearest', aspect='auto', cmap='seismic')
+
         fig.colorbar(img, ax=ax)
+        ax.set_title(f'{trial_idx}')
+
+    plt.tight_layout()
+    plt.show()
+
+    fig, axs = plt.subplots(len(summation_heatmap_univariate), 1, figsize=(
+        5, len(summation_heatmap_univariate)*5))
+
+    fig, axs = plt.subplots(n, 1, figsize=(5, n*5))
+
+    for ax, trial_idx in zip(axs, summation_heatmap_univariate):
+        ax.plot(summation_heatmap_univariate[trial_idx])
         ax.set_title(f'{trial_idx}')
 
     plt.tight_layout()
@@ -544,17 +669,18 @@ def main():
     # sampling rate is 30000 Hz
     config = {
         'NEURON_ID': 274,
-        'threshold': 0.1,
+        'threshold': 0.06,
         'bin_width': 0.01,
         'stride': 0.01,
         'save_folder_path': "./neuron_365/",
-        'selected_trials': [152, 169],
+        'selected_trials': [70, 212],
         'raw_spike_data_path': 'imec1_ks2/spike_times_sec_adj.npy',
         'neuron_identity_data_path': 'imec1_ks2/spike_clusters.npy',
         'raw_voltage_data_path': "./NL_NL106_20221103_session1_g0_tcat.imec1.ap.bin",
         'neuron_channel_path': "imec1_ks2/waveform_metrics.csv",
         'trial_time_info_path': 'AccessarySignalTime.mat',
         'template_used_data_path': 'imec1_ks2/templates.npy',
+        'optogenetic_stim_type_path': 'stim-trial-info.pkl',
         'trial_type_path': './NL106_yes_no_multipole_delay_stimDelay_Nov03_2022_Session1.mat',
         't0': 460,
         't1': 470,
@@ -562,43 +688,50 @@ def main():
         'TIME_AFTER_CUE': 3,
         'trialNum': 152,
         'optogenetic_desired_trial_type': 0,  # no optogenetic stimulation
-        'lick_direction_desired_trial_type': 1,  # 0 left lick, 1 right lick
+        'lick_direction_desired_trial_type': 0,  # 0 left lick, 1 right lick
+        'random_sample_number': 20,
     }
     config['desired_trial_type_name'] = f'optogenetic stimulation type (f{config["optogenetic_desired_trial_type"]}) + lick direction ({config["lick_direction_desired_trial_type"]}) threshold {config["threshold"]}'
     config['template_id'] = config['NEURON_ID']
     config['peakChannel'] = extractPeakChannel(config['NEURON_ID'])
-    config['selected_trials'] = generate_desired_trials(config)[-6:]
+    # config['selected_trials'] = generate_desired_trials(config)
     # additional_trials = list(range(200, 210))
     # config['selected_trials'] = np.sort(np.concatenate(
     #     (config['selected_trials'], additional_trials)))  # add 10 more trials that drifted
-    print(config['selected_trials'])
-    # list_of_threshold = [0.05, 0.06, 0.07, 0.08, 0.09, 0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17]
-    # list_of_neuron_id = extract_processed_neuron_raster(raw_spike_data_path, neuron_identity_data_path).keys()
-    # list_of_trial_num = [i for i in range(1, 300)]
-
-    # univariate_bin_fr_across_trials, multivariate_bin_fr_across_trials, kilosort_bin_fr_across_trials = bin_fr_calculation_across_specified_trials_specified_neuron(list_of_trial_Id=[32, 33, 34, 35, 36], desired_trial_type_name = desired_trial_type_name, raw_spike_data_path=raw_spike_data_path, neuron_identity_data_path=neuron_identity_data_path, trial_time_info_path=trial_time_info_path
-    #                                                            , NEURON_ID=NEURON_ID, TIME_BEFORE_CUE=TIME_BEFORE_CUE, TIME_AFTER_CUE=TIME_AFTER_CUE, template_id=template_id, bin_width=bin_width, threshold=threshold, stride=stride, peakChannel=peakChannel)
+    print(len(config['selected_trials']), config['selected_trials'])
 
     config["selected_trials_spikes_fr_voltage"] = get_uni_multi_kilosort_spikes_across_selected_trials(
         config)
-    # print("uni", config["selected_trials_spikes_fr_voltage"]
-    #       [152]["univariate_projection"].shape)
-    # print("multi", config["selected_trials_spikes_fr_voltage"]
-    #       [152]["multivariate_projection"].shape)
-    heatmap_univariate(config)
-
+    # heatmap_univariate(config)
     # plot_spikes_for_selected_trials(config)
     # plot_averaged_voltage_for_selected_trials(config)
-    # config["voltage_stats"] = get_voltage_stats(config)
-    # print(config["voltage_stats"])
+    config["voltage_stats"] = get_voltage_stats(config)
+    print(config["voltage_stats"])
     # plot_voltage_stats(config)
-    # print("result.keys()", result.keys())
-    # print("result['univariate_spike_time'].shape",
-    #       result[result.keys[0]]['univariate_spike_time'].shape)
-    # print("result['multi_variate_spike_time'].shape",
-    #       result[result.keys[0]]['multi_variate_spike_time'].shape)
-    # print("result['kilosort_spike_time'].shape",
-    #       result[result.keys[0]]['kilosort_spike_time'].shape)
+    config["univariate_projection_stats"] = get_univariate_projection_stats(
+        config)
+    x = config["univariate_projection_stats"][70]["denoised_projection"]
+    x1 = config["univariate_projection_stats"][70]["summation_univariate_projection"]
+    kilosort_spike_time = config['selected_trials_spikes_fr_voltage'][70]['kilosort_spike_time']
+    kilosort_spike_time = convert_spike_time_to_time_bin_count(config)
+    print(x.shape, x1.shape)
+    print(len(kilosort_spike_time))
+    corr, _ = pearsonr(x, kilosort_spike_time)
+    print('Denoisede projection spike time and kilosort spike time Pearsons correlation: %.3f' % corr)
+    print('Raw projection spike time and kilosort spike time Pearsons correlation: %.3f' %
+          pearsonr(x1, kilosort_spike_time)[0])
+
+    cca = CCA(n_components=1)
+    x1 = x1.reshape(-1, 1)
+    kilosort_spike_time = kilosort_spike_time.reshape(-1, 1)
+    cca.fit(x1, kilosort_spike_time)
+
+    X_c, Y_c = cca.transform(x1, kilosort_spike_time)
+
+    # To obtain the correlation
+    correlation = np.corrcoef(X_c.T, Y_c.T)[0, 1]
+    print(f'Correlation: {correlation}')
+    # plot_univariate_projection_stats(config)
 
     # # plot_drift_special(NEURON_ID, peakChannel, template_id, threshold)
     # # #Grab original kilosort retrieved spikes
