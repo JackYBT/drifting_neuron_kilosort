@@ -1,0 +1,803 @@
+import numpy as np
+from spike_extraction_helpers import extract_single_neuron_spike_times_for_specific_trial, center_around_cue, sliding_histogram, extract_processed_neuron_raster
+from raw_voltage import extractPeakChannel, getDataAndPlot, getMultipleTrialVoltage
+from matplotlib import pyplot as plt
+import os
+import scipy.stats
+import neo
+from elephant.spike_train_correlation import spike_time_tiling_coefficient
+from uni_multi_variate_helpers import *
+import pickle
+
+
+# def compare_spike_count_similarity(computed_spike, kilosort_spike):
+#     # Need to convert computed spike into -3 and 3 timescale
+#     """ OUTDATED) - this is just looking at cca,
+#     This needs to be updated to use the new spike count per bin"""
+#     computed_spike = np.array(computed_spike)
+#     kilosort_spike = np.array(kilosort_spike)
+
+#     c = np.correlate(computed_spike, kilosort_spike)
+#     cross_corr = c / np.sqrt(np.sum(computed_spike ** 2)
+#                              * np.sum(kilosort_spike ** 2))
+#     return cross_corr
+
+
+def plot_recovered_spike_against_kilosort_single_trial(computed_spike, kilosort_spike, neuron_id, trial_num, threshold, save_folder_path=None, multivariate=False):
+    """Plots the recovered spike against the kilosort spike, for a single trial"""
+    if len(computed_spike) == 0:
+        if multivariate:
+            print("computed_spike is empty for multivariate")
+        else:
+            print("computed_spike is empty for univariate ")
+        return
+    cross_corr = druckmann_correlation_calculation(
+        computed_spike, kilosort_spike)
+    fig, ax1 = plt.subplots()
+    for i, spike in enumerate(computed_spike):
+        if i == 0:
+            if multivariate:
+                ax1.vlines(spike, 0, 1, color='blue',
+                           label='Multi-variate recovered Spike')
+            else:
+                ax1.vlines(spike, 0, 1, color='blue',
+                           label='Uni-variate recovered Spike')
+        else:
+            ax1.vlines(spike, 0, 1, color='blue')
+    for i, spike in enumerate(kilosort_spike):
+        if i == 0:
+            ax1.vlines(spike, 0, 1, color='red',
+                       label="kilosort computed spikes")
+        else:
+            ax1.vlines(spike, 0, 1, color='red')
+    if multivariate:
+        title = f"multivariate_Neuron_{neuron_id}_Trial_{trial_num}_Threshold {threshold}_ccr_{round(np.mean(cross_corr),2)}_spike_count_comparison"
+    else:
+        title = f"univariate_Neuron_{neuron_id}_Trial_{trial_num}_Threshold {threshold}_ccr_{round(np.mean(cross_corr),2)}spike_count_comparison"
+    plt.title(title)
+    plt.legend()
+    if save_folder_path:
+        plt.savefig(os.path.join(save_folder_path, title + ".png"))
+    plt.show()
+
+
+def pearson_fr_calculation(computed_fr, kilosort_fr):
+    return scipy.stats.pearsonr(computed_fr, kilosort_fr)[0]
+
+
+def elephant_correlation_calculation(computed_spike, kilosort_spike):
+    '''Takes an input of 2 spike trains (The spike times) and returns the correlation coefficient'''
+    spike_train_1 = neo.SpikeTrain(
+        computed_spike, units='s', t_start=-3, t_stop=3)
+    spike_train_2 = neo.SpikeTrain(
+        kilosort_spike, units='s', t_start=-3, t_stop=3)
+    correlation_coeff = spike_time_tiling_coefficient(
+        spike_train_1, spike_train_2)
+    return correlation_coeff
+
+
+def plot_fr_comparison(univariate_bin_fr, multivariate_bin_fr, kilosort_bin_fr, NEURON_ID, threshold, trialNum, num_of_averaged_trials, desired_trial_type_name=None, save_folder_path=None):
+    '''univariate_bin_fr, multivariate_bin_fr, and kilosort_bin_fr should have the same size (since they are both binned up for 6 seconds)
+    Input should be the firing rate for one trial, and should have the shape of (num_bins, 1)'''
+    x = np.arange(len(univariate_bin_fr))
+    fig, axs = plt.subplots(3, 1, figsize=(15, 10))
+
+    # Plot for univariate_bin_fr
+    if trialNum is None and num_of_averaged_trials and desired_trial_type_name:
+        title = f"Neuron_{NEURON_ID}_Threshold {threshold}_fr_comparison_averaged_across_{num_of_averaged_trials}_trials_for_trial_type_{desired_trial_type_name}"
+    else:
+        title = f"Neuron_{NEURON_ID}_Trial_{trialNum}_Threshold {threshold}_fr_comparison"
+    axs[0].set_title('univariate retrieved spikes' + title)
+    axs[0].plot(x, univariate_bin_fr, color="red")
+    axs[0].set_xlabel('Time')
+    axs[0].set_ylabel('Firing rate')
+
+    # Plot for multivariate_bin_fr
+    axs[1].set_title('multivariate retrieved spikes' + title)
+    axs[1].plot(x, multivariate_bin_fr, color="green")
+    axs[1].set_xlabel('Time')
+    axs[1].set_ylabel('Firing rate')
+
+    # Plot for kilosort_bin_fr
+    axs[2].set_title('kilosort retrieved spikes' + title)
+    axs[2].plot(x, kilosort_bin_fr, color="blue")
+    axs[2].set_xlabel('Time')
+    axs[2].set_ylabel('Firing rate')
+
+    plt.tight_layout()
+    if save_folder_path:
+        plt.savefig(os.path.join(save_folder_path, title + ".png"))
+
+    plt.show()
+
+# TODO: 1. only look at non-stimulation trials, 2. look at the difference between the raw_voltage for the drifted and non-drifted trials. Did the SNR decrease? Or did the majority of the signals decreased? And how did the projections of the univariate projections change? 3. Implmeent the multi-NOVA multivariate method
+
+
+# def plot_uni_multi_kilo_fr_across_specified_trials_specified_neuron(list_of_trial_Id, desired_trial_type_name, raw_spike_data_path, neuron_identity_data_path, trial_time_info_path, NEURON_ID, TIME_BEFORE_CUE, TIME_AFTER_CUE, template_id, bin_width, threshold, stride, peakChannel):
+#     '''Given a list of trials, and a specific neuron ID, calcualte the uni, multi, kilosort firing rate against one another, and then plot them'''
+
+#     kilosort_bin_fr_across_trials = []
+#     univariate_bin_fr_across_trials = []
+#     multivariate_bin_fr_across_trials = []
+
+#     for trialNum in list_of_trial_Id:
+#         # Grab original kilosort retrieved spikes for this trial
+#         kilosort_computed_spike_time, cue_time = extract_single_neuron_spike_times_for_specific_trial(
+#             raw_spike_data_path, neuron_identity_data_path, trial_time_info_path, trialNum, NEURON_ID, TIME_BEFORE_CUE, TIME_AFTER_CUE)
+#         kilosort_computed_spike_time = center_around_cue(
+#             kilosort_computed_spike_time, cue_time)
+
+#         # Grab the template and raw_voltage data used for this neuron, for the specified neuron ID
+#         current_neuron_template = extract_template(
+#             template_used_data_path, template_id)
+#         raw_voltage_data_per_neuron = getDataAndPlot(
+#             voltage_data_path, cue_time + TIME_BEFORE_CUE, cue_time + TIME_AFTER_CUE, peakChannel, plot=False, allChannels=True)
+#         utilized_Channels = return_utilized_channels(current_neuron_template)
+
+#         # Convert the raw_voltage data into a univariate projection
+#         univariate_projection = univariate(
+#             raw_voltage_data_per_neuron, current_neuron_template)
+
+#         # Convert the raw_voltage data into a multivariate projection
+#         multivariate_projection = multivariate(
+#             raw_voltage_data_per_neuron, current_neuron_template, utilized_Channels)
+
+#         # Convert the projection into spikes
+#         univariate_recovered_spike = convert_dot_product_to_spike_count_univariate(
+#             univariate_projection, utilized_Channels, threshold)
+#         multivariate_recovered_spike = convert_dot_product_to_spike_count_multivariate(
+#             multivariate_projection, utilized_Channels, threshold)
+
+#         # Convert the spike count into firing rate
+#         bin_centers, univariate_bin_fr = convert_spike_time_to_fr(
+#             univariate_recovered_spike, TIME_BEFORE_CUE, TIME_AFTER_CUE, bin_width, stride, rate=True)
+#         _, multivariate_bin_fr = convert_spike_time_to_fr(
+#             multivariate_recovered_spike, TIME_BEFORE_CUE, TIME_AFTER_CUE, bin_width, stride, rate=True)
+#         _, kilosort_bin_fr = convert_spike_time_to_fr(
+#             kilosort_computed_spike_time, TIME_BEFORE_CUE, TIME_AFTER_CUE, bin_width, stride, rate=True)
+
+#         kilosort_bin_fr_across_trials.append(kilosort_bin_fr)
+#         univariate_bin_fr_across_trials.append(univariate_bin_fr)
+#         multivariate_bin_fr_across_trials.append(multivariate_bin_fr)
+#         print(f'{trialNum} trial done')
+#     print(f'All trials done')
+#     kilosort_bin_fr_across_trials = np.array(kilosort_bin_fr_across_trials)
+#     univariate_bin_fr_across_trials = np.array(univariate_bin_fr_across_trials)
+#     multivariate_bin_fr_across_trials = np.array(
+#         multivariate_bin_fr_across_trials)
+
+#     print(
+#         f'kilosort_bin_fr_across_trials shape: {kilosort_bin_fr_across_trials.shape}')
+#     print(
+#         f'univariate_bin_fr_across_trials shape: {univariate_bin_fr_across_trials.shape}')
+#     print(
+#         f'multivariate_bin_fr_across_trials shape: {multivariate_bin_fr_across_trials.shape}')
+
+#     kilosort_bin_fr_across_trials = np.mean(
+#         kilosort_bin_fr_across_trials, axis=0)
+#     univariate_bin_fr_across_trials = np.mean(
+#         univariate_bin_fr_across_trials, axis=0)
+#     multivariate_bin_fr_across_trials = np.mean(
+#         multivariate_bin_fr_across_trials, axis=0)
+
+#     print(
+#         f'kilosort_bin_fr_across_trials shape: {kilosort_bin_fr_across_trials.shape}')
+#     print(
+#         f'univariate_bin_fr_across_trials shape: {univariate_bin_fr_across_trials.shape}')
+#     print(
+#         f'multivariate_bin_fr_across_trials shape: {multivariate_bin_fr_across_trials.shape}')
+
+#     plot_fr_comparison(univariate_bin_fr_across_trials, univariate_bin_fr_across_trials, kilosort_bin_fr_across_trials, NEURON_ID,
+#                        threshold, num_of_averaged_trials=len(list_of_trial_Id), desired_trial_type_name=desired_trial_type_name, trialNum=None)
+
+#     return univariate_bin_fr_across_trials, multivariate_bin_fr_across_trials, kilosort_bin_fr_across_trials
+
+
+def plot_drift_special(NEURON_ID, peakChannel, template_id, threshold):
+
+    drifted_trial_num = 302  # Licks left
+    # Grab original kilosort retrieved spikes
+    kilosort_computed_spike_time, cue_time = extract_single_neuron_spike_times_for_specific_trial(
+        raw_spike_data_path, neuron_identity_data_path, trial_time_info_path, drifted_trial_num, NEURON_ID, TIME_BEFORE_CUE, TIME_AFTER_CUE)
+    kilosort_computed_spike_time = center_around_cue(
+        kilosort_computed_spike_time, cue_time)
+
+    # Grab the template and raw_voltage data used for this neuron, for the specified neuron ID
+    current_neuron_template = extract_template(
+        template_used_data_path, template_id)
+    raw_voltage_data_per_neuron = getDataAndPlot(
+        voltage_data_path, cue_time + TIME_BEFORE_CUE, cue_time + TIME_AFTER_CUE, peakChannel, plot=False, allChannels=True)
+    utilized_Channels = return_utilized_channels(current_neuron_template)
+
+    # Convert the raw_voltage data into a univariate projection
+    univariate_projection = univariate(
+        raw_voltage_data_per_neuron, current_neuron_template)
+    print("univariate_projection", univariate_projection)
+
+    # Convert the raw_voltage data into a multivariate projection
+    multivariate_projection = multivariate(
+        raw_voltage_data_per_neuron, current_neuron_template, utilized_Channels)
+    print("multivariate_projection", multivariate_projection)
+
+    # Convert the projection into spikes
+    univariate_recovered_spike = convert_dot_product_to_spike_count_univariate(
+        univariate_projection, utilized_Channels, threshold)
+    multivariate_recovered_spike = convert_dot_product_to_spike_count_multivariate(
+        multivariate_projection, utilized_Channels, threshold)
+
+    print("kilosort_computed_spike_time", len(
+        kilosort_computed_spike_time), kilosort_computed_spike_time)
+    print("univariate_recovered_spike", len(
+        univariate_recovered_spike), univariate_recovered_spike)
+    print("multivariate_recovered_spike", len(
+        multivariate_recovered_spike), multivariate_recovered_spike)
+
+    no_drift_trial_num = 150  # Licks left
+    no_drift_kilosort_computed_spike_time, no_drift_cue_time = extract_single_neuron_spike_times_for_specific_trial(
+        raw_spike_data_path, neuron_identity_data_path, trial_time_info_path, no_drift_trial_num, NEURON_ID, TIME_BEFORE_CUE, TIME_AFTER_CUE)
+    no_drift_kilosort_computed_spike_time = center_around_cue(
+        no_drift_kilosort_computed_spike_time, no_drift_cue_time)
+
+    # Plot the spikes individually then against the kilosort recovered spikes
+    # plot_spike_times_per_trial(univariate_recovered_spike, NEURON_ID, trialNum, threshold)
+    # plot_spike_times_per_trial(multivariate_recovered_spike, NEURON_ID, trialNum, threshold, multivariate=True)
+
+    elephant_corr = elephant_correlation_calculation(
+        univariate_recovered_spike, kilosort_computed_spike_time)
+    print(f'univariate elephant_corr: {elephant_corr}')
+    elephant_corr = elephant_correlation_calculation(
+        multivariate_recovered_spike, kilosort_computed_spike_time)
+    print(f'multivariate elephant_corr: {elephant_corr}')
+    # plot_recovered_spike_against_kilosort_single_trial(univariate_recovered_spike, kilosort_computed_spike_time, NEURON_ID, trialNum, threshold, save_folder_path)
+    # plot_recovered_spike_against_kilosort_single_trial(multivariate_recovered_spike, kilosort_computed_spike_time, NEURON_ID, trialNum, threshold, save_folder_path, multivariate=True)
+
+    fig, ax1 = plt.subplots()
+    for i, spike in enumerate(univariate_recovered_spike):
+        if i == 0:
+            ax1.vlines(spike, 0, 0.25, color='blue',
+                       label='Uni-variate recovered Spike')
+        else:
+            ax1.vlines(spike, 0, 0.25, color='blue')
+    for i, spike in enumerate(multivariate_recovered_spike):
+        if i == 0:
+            ax1.vlines(spike, 0.25, 0.5, color='green',
+                       label='Multi-variate recovered Spike')
+        else:
+            ax1.vlines(spike, 0.25, 0.5, color='green')
+
+    for i, spike in enumerate(kilosort_computed_spike_time):
+        if i == 0:
+            ax1.vlines(spike, 0.5, 0.75, color='red',
+                       label="kilosort computed spikes")
+        else:
+            ax1.vlines(spike, 0.5, 0.75, color='red')
+    for i, spike in enumerate(no_drift_kilosort_computed_spike_time):
+        if i == 0:
+            ax1.vlines(spike, 0.75, 1, color='purple',
+                       label="NO-DRIFT-Trial-150-kilosort computed spikes")
+        else:
+            ax1.vlines(spike, 0.75, 1, color='purple')
+
+    title = f"NEURON_ID: {NEURON_ID} spike_count_comparison_for_drift (302) v.s. no drift (150)"
+    plt.title(title)
+    plt.legend()
+    plt.show()
+
+
+def generate_desired_trials(config):
+    '''Generate the desired trial index based on the desired optogenetics and lick direction type'''
+    # open the optogenetic stimualtion trial type file
+    with open(config['optogenetic_stim_type_path'], 'rb') as handle:
+        stim_file = pickle.load(handle)
+    optogenetic_desired_trial_type = config['optogenetic_desired_trial_type']
+
+    print("stim_file", type(stim_file))
+    if optogenetic_desired_trial_type == 0:
+        optogenetic_desired_trial_idx = stim_file["no-stim"]
+    else:
+        optogenetic_desired_trial_idx = stim_file["stim"]
+
+    print("optogenetic_trial_type", optogenetic_desired_trial_type)
+    print("total length of optogenetic_trial_type",
+          len(optogenetic_desired_trial_idx))
+
+    matFile = scipy.io.loadmat(config['trial_type_path'])
+    # open the lick direction trial type file
+    lick_direction_trial_type = matFile['SessionData'][0, 0]["TrialTypes"][0]
+    # TODO: Not sure if 0 is left lick or right lick, but assuming left lick
+    lick_direction_desired_trial_type = config['lick_direction_desired_trial_type']
+    lick_direction_desired_trial_idx = np.where(
+        lick_direction_trial_type == lick_direction_desired_trial_type)[0]
+
+    desired_trial_idx = np.intersect1d(
+        optogenetic_desired_trial_idx, lick_direction_desired_trial_idx)
+
+    if config['begin_non_drift_trial_id'] is not None and config['end_non_drift_trial_id'] is not None:
+        temp = [elem for elem in desired_trial_idx
+                if elem >= config['begin_non_drift_trial_id'] and elem <= config['end_non_drift_trial_id']]
+        desired_trial_idx = temp
+    if config['random_sample_number'] is not None and config['random_sample_number'] < len(desired_trial_idx):
+        desired_trial_idx = np.random.choice(
+            desired_trial_idx, config['random_sample_number'], replace=False)
+
+    return np.sort(desired_trial_idx)
+
+
+def plot_spikes_for_selected_trials(config):
+    '''Plots the spikes '''
+    data = config['selected_trials_spikes_fr_voltage']
+
+    fig, axs = plt.subplots(3, 1)
+    fig.tight_layout(pad=1.0)  # Increase padding between subplots
+    fig.suptitle(
+        f"NEURON_ID: {config['NEURON_ID']} {config['desired_trial_type_name']}")
+
+    for i, trial_id in enumerate(data.keys(), start=1):
+        univariate_spike_time = data[trial_id]['univariate_spike_time']
+        y = [i] * len(univariate_spike_time)
+        axs[0].plot(univariate_spike_time, y, '|', color='blue')
+        axs[0].set_title('Univariate')
+    axs[0].set_yticks(range(1, len(data) + 1))
+    axs[0].set_yticklabels(list(data.keys()))
+
+    for i, trial_id in enumerate(data.keys(), start=1):
+        multivariate_spike_time = data[trial_id]['multivariate_spike_time']
+        y = [i] * len(multivariate_spike_time)
+        axs[1].plot(multivariate_spike_time, y, '|', color='green')
+        axs[1].set_title('Multivariate')
+    axs[1].set_yticks(range(1, len(data) + 1))
+    axs[1].set_yticklabels(list(data.keys()))
+
+    for i, trial_id in enumerate(data.keys(), start=1):
+        kilosort_spike_time = data[trial_id]['kilosort_spike_time']
+        y = [i] * len(kilosort_spike_time)
+        axs[2].plot(kilosort_spike_time, y, '|', color='black')
+        axs[2].set_title('Kilosort')
+    axs[2].set_yticks(range(1, len(data) + 1))
+    axs[2].set_yticklabels(list(data.keys()))
+
+    fig.text(0.04, 0.5, 'Trial ID', va='center', rotation='vertical')
+    plt.show()
+
+
+def plot_averaged_voltage_for_selected_trials(config):
+    selected_trials_spikes_fr_voltage = config['selected_trials_spikes_fr_voltage']
+
+    # Identifying the utilized_channels
+    cur_template = extract_template(
+        template_used_data_path=config["template_used_data_path"], templateId=config["NEURON_ID"])
+    utilized_channels = np.array(return_utilized_channels(cur_template))
+
+    fig, axs = plt.subplots(len(selected_trials_spikes_fr_voltage), 1, figsize=(
+        10, 0.5*len(selected_trials_spikes_fr_voltage)))
+
+    for i, trial_idx in enumerate(selected_trials_spikes_fr_voltage):
+        raw_voltage = np.array(
+            selected_trials_spikes_fr_voltage[trial_idx]['raw_voltage'])
+
+        selected_channels_voltage = raw_voltage[utilized_channels]
+        averaged_channels_voltage = np.mean(
+            selected_channels_voltage, axis=0).squeeze()
+
+        time = np.linspace(config["TIME_BEFORE_CUE"], config["TIME_AFTER_CUE"], len(
+            averaged_channels_voltage))
+
+        axs[i].plot(time, averaged_channels_voltage,
+                    label=f'{trial_idx}')
+        # axs[i].set_title(f'Voltage vs Time for Trial {trial_idx}')
+        axs[i].set_xlabel('Time')
+        axs[i].set_ylabel('Voltage')
+        # axs[i].set_yticks(np.arange(np.min(averaged_channels_voltage), np.max(averaged_channels_voltage), step=0.5))
+        axs[i].legend()
+    fig.suptitle(
+        f"Averaged Voltage across Utilized Channel for neuron{config['NEURON_ID']}")
+    plt.tight_layout()
+    plt.show()
+
+
+def get_voltage_stats(config):
+    selected_trials_spikes_fr_voltage = config['selected_trials_spikes_fr_voltage']
+    # Identifying the utilized_channels
+    cur_template = extract_template(
+        template_used_data_path=config["template_used_data_path"], templateId=config["NEURON_ID"])
+    utilized_channels = np.array(return_utilized_channels(cur_template))
+
+    result = {}
+    for idx, trial_idx in enumerate(selected_trials_spikes_fr_voltage):
+        raw_voltage = np.array(
+            selected_trials_spikes_fr_voltage[trial_idx]['raw_voltage'])
+
+        # Shape (32, num_bins_in_6_seconds)
+        selected_channels_voltage = raw_voltage[utilized_channels]
+        averaged_channels_voltage = np.mean(
+            selected_channels_voltage, axis=0).squeeze()  # average over all channels of a timebin, but i lose information on variability within the channels
+
+        # average over all timebins of a trial (This tells us )
+        average = np.mean(averaged_channels_voltage)
+        std = np.std(averaged_channels_voltage)
+        # If i am losing spikes, I must be losing spikes in the same timebin across 32 channels all at once
+        # The hypothesis is that, because kilosort is summing over all template X Channel dot products, if there are a
+        # few outlier negative channels that are very negative, that will bring the overall summation down.
+        # To identify that, you would need to look at, whether there is a big difference between the summation of just the positive numbers, the summation of
+        # All the numbers, for trials that drifted and didn't drift
+        result[trial_idx] = {
+            "average": average,
+            "std": std,
+            "max": np.max(averaged_channels_voltage),
+            "min": np.min(averaged_channels_voltage)
+        }
+        num_outliers = len([i for i in averaged_channels_voltage if (
+            i > average + 3 * std) or (i < average - 3 * std)])
+
+        result[trial_idx]["num_outliers"] = num_outliers
+    return result
+
+
+def plot_voltage_stats(config):
+    # List of channels
+    voltage_stats = config['voltage_stats']
+    trials = list(voltage_stats.keys())
+    positions = list(range(len(trials)))
+
+    # Lists of metrics
+    averages = [voltage_stats[trial]['average'] for trial in trials]
+    std_devs = [voltage_stats[trial]['std'] for trial in trials]
+    max_vals = [voltage_stats[trial]['max'] for trial in trials]
+    min_vals = [voltage_stats[trial]['min'] for trial in trials]
+    num_outliers = [voltage_stats[trial]['num_outliers'] for trial in trials]
+
+    # Create a figure and a set of subplots
+    fig, axs = plt.subplots(5, figsize=(5, 10))
+
+    # Plot the data
+    axs[0].bar(positions, averages, color='blue')
+    axs[0].set_title('Average')
+    axs[0].set_ylabel('Value')
+    axs[0].set_xticks(positions)
+    axs[0].set_xticklabels(trials, rotation='vertical')
+
+    axs[1].bar(positions, std_devs, color='orange')
+    axs[1].set_title('Standard Deviation')
+    axs[1].set_ylabel('Value')
+    axs[1].set_xticks(positions)
+    axs[1].set_xticklabels(trials, rotation='vertical')
+
+    axs[2].bar(positions, max_vals, color='green')
+    axs[2].set_title('Maximum Values')
+    axs[2].set_ylabel('Value')
+    axs[2].set_xticks(positions)
+    axs[2].set_xticklabels(trials, rotation='vertical')
+
+    axs[3].bar(positions, min_vals, color='red')
+    axs[3].set_title('Minimum Values')
+    axs[3].set_ylabel('Value')
+    axs[3].set_xticks(positions)
+    axs[3].set_xticklabels(trials, rotation='vertical')
+
+    axs[4].bar(positions, num_outliers, color='purple')
+    axs[4].set_title('Outliers')
+    axs[4].set_ylabel('Value')
+    axs[4].set_xticks(positions)
+    axs[4].set_xticklabels(trials, rotation='vertical')
+
+    # Display the plot
+    fig.suptitle(
+        f'Voltage Stats for utilized Channels of neuron{config["NEURON_ID"]} {config["desired_trial_type_name"]}')
+    # plt.subplots_adjust(bottom=0.1, top=0.4)
+    plt.show()
+
+
+def plot_spike_triggered_average(config):
+    for trial in config['selected_trials']:
+        denoised_uni_projection = config["univariate_projection_stats"][trial]["denoised_projection"]
+        summation_uni_projection = config["univariate_projection_stats"][trial]["summation_univariate_projection"]
+        kilosort_spike_time = config["selected_trials_spikes_fr_voltage"][trial]["kilosort_spike_time"]
+        kilosort_spike_bin = convert_spike_time_to_time_bin_count(
+            kilosort_spike_time, trial, config)
+
+        colors = ['lightgray'] * len(denoised_uni_projection)
+
+        count = 0
+        for idx, bin in enumerate(kilosort_spike_bin):
+            if bin == 1 and idx > 1:
+                colors[idx] = 'red'
+                colors[idx-1] = 'red'
+                # colors[idx-2] = 'red'
+                count += 1
+        x = np.arange(len(denoised_uni_projection))
+        print("number of spikes", count)
+        print("x,shape", x.shape)
+        print("denoised_uni_projection.shape", denoised_uni_projection.shape)
+        # plot line segments in the specified color
+        plt.figure(figsize=(10, 10))
+        for i in range(1, len(summation_uni_projection)):
+            plt.plot(x[i-1:i+1], summation_uni_projection[i-1:i+1],
+                     color=colors[i])
+        plt.title(
+            f'Neuron {config["NEURON_ID"]} trial: {trial} univariate projection. Red means a kilosort spike was detected for that time-bin.')
+        plt.show()
+
+
+def plot_elephant_correlation(config):
+    elephant_corr_list = []
+    for trial in config['selected_trials']:
+        univariate_spike_time = config["selected_trials_spikes_fr_voltage"][trial]['univariate_spike_time']
+        kilosort_spike_time = config["selected_trials_spikes_fr_voltage"][trial]['kilosort_spike_time']
+        multivariate_spike_time = config["selected_trials_spikes_fr_voltage"][trial]['multivariate_spike_time']
+
+        print('univariate_spike_time', univariate_spike_time)
+        print('kilosort_spike_time', kilosort_spike_time)
+        # elephant_corr = elephant_correlation_calculation(
+        #     univariate_spike_time, kilosort_spike_time)
+        elephant_corr = elephant_correlation_calculation(
+            multivariate_spike_time, kilosort_spike_time)
+
+        elephant_corr_list.append(elephant_corr)
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.bar(range(len(elephant_corr_list)), elephant_corr_list)
+    ax.set_xticks(range(len(elephant_corr_list)))
+    ax.set_xticklabels(config['selected_trials'], rotation='vertical')
+    ax.set_xlabel('Trial number')
+    ax.set_ylabel('Elephant Correlation')
+    ax.set_title(
+        f'Elephant Correlation by Trial Number for neuron {config["NEURON_ID"]}')
+    plt.show()
+
+
+def compare_univariate_template(config):
+    cur_template = extract_template(
+        config, config['NEURON_ID'])
+    utilized_channels = return_utilized_channels(cur_template)
+
+    univariate_projection = []
+    for trial in config['selected_trials_spikes_fr_voltage'].keys():
+        univariate_projection.append(
+            config['selected_trials_spikes_fr_voltage'][trial]['univariate_projection'])
+
+    avg_univariate_projection = np.mean(univariate_projection, axis=0)
+    print("avg_univariate_projection", avg_univariate_projection.shape)
+    print("avg_univariate_projection utilized_channels",
+          return_utilized_channels(avg_univariate_projection))
+    print("cur_template", cur_template)
+    print("cur_template utilized_channels", utilized_channels)
+
+# def plot_univariate_projection_related_voltage(config):
+# #TODO: Write a function that grabs the voltage signals of the spikes in a given trial if the sumation of the univariate passes the threshold of 5,
+# # If it does, plot it against the voltage.
+#     for trial in config['selected_trials']:
+
+
+def main():
+    # time_for_all_trials = 4193 #seconds took to record all trials
+    # sampling rate is 30000 Hz
+    # config = {
+    #     'NEURON_ID': 110,
+    #     'threshold': 0.11,
+    #     'bin_width': 0.01,
+    #     'stride': 0.01,
+    #     'save_folder_path': "./neuron_365/",
+    #     'selected_trials': [4, 10, 30],
+    #     'raw_spike_data_path': 'imec1_ks2/spike_times_sec_adj.npy',
+    #     'neuron_identity_data_path': 'imec1_ks2/spike_clusters.npy',
+    #     'raw_voltage_data_path': "./NL_NL106_20221103_session1_g0_tcat.imec1.ap.bin",
+    #     'neuron_channel_path': "imec1_ks2/waveform_metrics.csv",
+    #     'trial_time_info_path': 'AccessarySignalTime.mat',
+    #     'template_used_data_path': 'imec1_ks2/templates.npy',
+    #     'optogenetic_stim_type_path': 'stim-trial-info.pkl',
+    #     'trial_type_path': './NL106_yes_no_multipole_delay_stimDelay_Nov03_2022_Session1.mat',
+    #     # 't0': 460,
+    #     # 't1': 470,
+    #     'TIME_BEFORE_CUE': -3,
+    #     'TIME_AFTER_CUE': 3,
+    #     'trialNum': 152,
+    #     'optogenetic_desired_trial_type': 0,  # no optogenetic stimulation
+    #     'lick_direction_desired_trial_type': 0,  # 0 left lick, 1 right lick
+    #     'random_sample_number': 10,
+    #     'begin_non_drift_trial_id': 0,
+    #     'end_non_drift_trial_id': 150,
+    # }
+    config['desired_trial_type_name'] = f'optogenetic stimulation type (f{config["optogenetic_desired_trial_type"]}) + lick direction ({config["lick_direction_desired_trial_type"]}) threshold {config["threshold"]}'
+    config['template_id'] = config['NEURON_ID']
+    config['peakChannel'] = extractPeakChannel(config['NEURON_ID'])
+    config['selected_trials'] = generate_desired_trials(config)
+    # additional_trials = list(range(200, 210))
+    # config['selected_trials'] = np.sort(np.concatenate(
+    #     (config['selected_trials'], additional_trials)))  # add 10 more trials that drifted
+    print(len(config['selected_trials']), config['selected_trials'])
+
+    _, all_cue_time = extract_trial_time_info(config['trial_time_info_path'])
+    # print("all_cue_time.shape", len(all_cue_time), all_cue_time)
+    config["selected_trials_spikes_fr_voltage"] = get_uni_multi_kilosort_spikes_across_selected_trials(
+        config)
+
+    # plot_elephant_correlation(config)
+    config["univariate_projection_stats"] = get_univariate_projection_stats(
+        config)
+    # multivariate_regression(config)
+    # heatmap_univariate(config)
+    # plot_spikes_for_selected_trials(config)
+    # plot_averaged_voltage_for_selected_trials(config)
+    # config["voltage_stats"] = get_voltage_stats(config)
+    # print(config["voltage_stats"])
+    # # plot_voltage_stats(config)
+    #     config)
+    # plot_spike_triggered_average(config)
+    # plot_univariate_projection_stats(config)
+
+    # x = config["univariate_projection_stats"][10]["denoised_projection"]
+    # x1 = config["univariate_projection_stats"][10]["summation_univariate_projection"]
+    # kilosort_spike_time = config['selected_trials_spikes_fr_voltage'][10]['kilosort_spike_time']
+    # kilosort_spike_time = convert_spike_time_to_time_bin_count(
+    #     kilosort_spike_time, 10, config)
+
+    # print(x.shape, x1.shape)
+    # print(len(kilosort_spike_time))
+    # corr, _ = pearsonr(x, kilosort_spike_time)
+    # print('Denoisede projection spike time and kilosort spike time Pearsons correlation: %.3f' % corr)
+    # print('Raw projection spike time and kilosort spike time Pearsons correlation: %.3f' %
+    #       pearsonr(x1, kilosort_spike_time)[0])
+
+    # cca = CCA(n_components=1)
+    # x1 = x1.reshape(-1, 1)
+    # kilosort_spike_time = kilosort_spike_time.reshape(-1, 1)
+    # cca.fit(x1, kilosort_spike_time)
+
+    # X_c, Y_c = cca.transform(x1, kilosort_spike_time)
+
+    # # To obtain the correlation
+    # correlation = np.corrcoef(X_c.T, Y_c.T)[0, 1]
+    # print(f'Correlation: {correlation}')
+
+    # # plot_drift_special(NEURON_ID, peakChannel, template_id, threshold)
+    # # #Grab original kilosort retrieved spikes
+    # kilosort_computed_spike_time, cue_time = extract_single_neuron_spike_times_for_specific_trial(
+    #     config["raw_spike_data_path"], config["neuron_identity_data_path"], config["trial_time_info_path"], config["trialNum"], config["NEURON_ID"], config["TIME_BEFORE_CUE"], config["TIME_AFTER_CUE"])
+    # kilosort_computed_spike_time = center_around_cue(
+    #     kilosort_computed_spike_time, cue_time)
+
+    # # #Grab the template and raw_voltage data used for this neuron, for the specified neuron ID
+    # current_neuron_template = extract_template(
+    #     config["template_used_data_path"], config['template_id'])
+    # raw_voltage_data_per_neuron = getDataAndPlot(config["raw_voltage_data_path"], cue_time + config['TIME_BEFORE_CUE'],
+    #                                              cue_time + config['TIME_AFTER_CUE'], config['peakChannel'], plot=False, allChannels=True)
+    # utilized_Channels = return_utilized_channels(current_neuron_template)
+
+    # # #Convert the raw_voltage data into a univariate projection
+    # univariate_projection = univariate(
+    #     raw_voltage_data_per_neuron, current_neuron_template)
+    # print("univariate_projection", univariate_projection)
+
+    # # Loop through univairatie projection and identify if there are any numbers larger than 0
+    # # If there are, then that means that the neuron fired at that time
+
+    # # Convert the raw_voltage data into a multivariate projection
+    # print("input to multivariate function has shape, ",
+    #       raw_voltage_data_per_neuron.shape)
+    # multivariate_projection = multivariate(
+    #     raw_voltage_data_per_neuron, current_neuron_template, utilized_Channels)
+    # print("multivariate_projection", multivariate_projection)
+
+    # #Convert the projection into spikes
+    # univariate_recovered_spike = convert_dot_product_to_spike_count_univariate(univariate_projection, utilized_Channels, threshold)
+    # multivariate_recovered_spike = convert_dot_product_to_spike_count_multivariate(multivariate_projection, utilized_Channels, threshold)
+
+    # print("kilosort_computed_spike_time", len(kilosort_computed_spike_time), kilosort_computed_spike_time)
+    # print("univariate_recovered_spike", len(univariate_recovered_spike), univariate_recovered_spike)
+    # print("multivariate_recovered_spike", len(multivariate_recovered_spike), multivariate_recovered_spike)
+
+    # # Plot the spikes individually then against the kilosort recovered spikes
+    # plot_uni_multivariate_spike_count_per_trial(univariate_recovered_spike, NEURON_ID, trialNum, threshold)
+    # plot_uni_multivariate_spike_count_per_trial(multivariate_recovered_spike, NEURON_ID, trialNum, threshold, multivariate=True)
+
+    # plot_recovered_spike_against_kilosort_single_trial(univariate_recovered_spike, kilosort_computed_spike_time, NEURON_ID, trialNum, threshold, save_folder_path)
+    # plot_recovered_spike_against_kilosort_single_trial(multivariate_recovered_spike, kilosort_computed_spike_time, NEURON_ID, trialNum, threshold, save_folder_path, multivariate=True)
+
+    # #Since we're using a bin width of 0.01, and some of the neurons fire sporadically, the firing rate returned is in Hz, and it might be 100Hz, which is higher than the real firing rate
+
+    # #Convert the spike count into firing rate
+    # bin_centers, univariate_bin_fr = convert_spike_time_to_fr(univariate_recovered_spike, TIME_BEFORE_CUE, TIME_AFTER_CUE, bin_width, stride, rate=True)
+    # _, multivariate_bin_fr = convert_spike_time_to_fr(multivariate_recovered_spike, TIME_BEFORE_CUE, TIME_AFTER_CUE, bin_width, stride, rate=True)
+    # _, kilosort_bin_fr = convert_spike_time_to_fr(kilosort_computed_spike_time, TIME_BEFORE_CUE, TIME_AFTER_CUE, bin_width, stride, rate=True)
+
+    # plot_fr_comparison(univariate_bin_fr, multivariate_bin_fr, kilosort_bin_fr, NEURON_ID,  threshold, trialNum, save_folder_path)
+
+    # print("bin_centers", bin_centers)
+    # print("bin_fr", univariate_bin_fr)
+    # print("kilosort_bin_fr", kilosort_bin_fr)
+    # print('Univariate Pearson correlation coefficient: ', scipy.stats.pearsonr(univariate_bin_fr, kilosort_bin_fr)[0])
+    # print('Multivariate Pearson correlation coefficient: ', scipy.stats.pearsonr(multivariate_bin_fr, kilosort_bin_fr)[0])
+    # print('univariate kilosort correlation druckmann equation:', druckmann_correlation_calculation(univariate_recovered_spike, kilosort_computed_spike_time))
+    # print('multivariate kilosort correlation druckmann equation:', druckmann_correlation_calculation(multivariate_recovered_spike, kilosort_computed_spike_time))
+
+
+# threshold_results, pearson_corr_threshold = find_optimal_threshold(list_of_threshold, list_of_neuron_id, list_of_trial_num, raw_spike_data_path, neuron_identity_data_path, trial_time_info_path, voltage_data_path, template_used_data_path, TIME_BEFORE_CUE, TIME_AFTER_CUE, bin_width, stride)
+# print("threshold_results", threshold_results)
+# print("pearson_corr_threshold", pearson_corr_threshold)
+# np.save("./threshold_results.npy", threshold_results)
+# np.save("./pearson_corr_threshold.npy", pearson_corr_threshold)
+if __name__ == "__main__":
+    main()
+
+
+# def find_optimal_threshold(list_of_threshold, list_of_neuron_id, list_of_trial_num, raw_spike_data_path, neuron_identity_data_path, trial_time_info_path, voltage_data_path, template_used_data_path, TIME_BEFORE_CUE, TIME_AFTER_CUE, bin_width, stride):
+#     results = {}
+#     start_time = time.time()
+
+#     pearson_corr_with_neuron = {}
+#     for cur_threshold in list_of_threshold:
+
+#         cur_threshold_pearson_corr = []
+#         pearson_corr_with_neuron[cur_threshold] = {}
+
+#         for cur_neuron_id in list_of_neuron_id:
+#             pearson_corr_with_neuron[cur_threshold][cur_neuron_id] = []
+#             cur_template_id = cur_neuron_id
+#             peakChannel = extractPeakChannel(cur_neuron_id)
+
+#             #grab the template used for this neuron
+#             current_neuron_template = extract_template(template_used_data_path, cur_template_id)
+#             utilized_Channels = return_utilized_channels(current_neuron_template)
+
+#             for cur_trial_num in list_of_trial_num:
+
+#                 #grav the raw spike data and center it around the go cue
+#                 kilosort_computed_spike_time, cue_time = extract_single_neuron_spike_times_for_specific_trial(raw_spike_data_path, neuron_identity_data_path, trial_time_info_path, cur_trial_num, cur_neuron_id, TIME_BEFORE_CUE, TIME_AFTER_CUE)
+#                 kilosort_computed_spike_time = center_around_cue(kilosort_computed_spike_time, cue_time)
+
+#                 #grav raw_voltage_data_per_neuron_per specific trial
+#                 raw_voltage_data_per_neuron = getDataAndPlot(voltage_data_path, cue_time + TIME_BEFORE_CUE, cue_time + TIME_AFTER_CUE, peakChannel, plot=False, allChannels=True)
+
+#                 #grab the univariate data per neuron per trial
+#                 univariate_projection = univariate(raw_voltage_data_per_neuron, current_neuron_template)
+
+#                 #convert univariate projection into spike count per bin
+#                 univariate_recovered_spike = convert_dot_product_to_spike_count_univariate(univariate_projection, utilized_Channels, cur_threshold)
+#                 # cross_corr = compare_spike_count_similarity(univariate_recovered_spike, kilosort_computed_spike_time)
+#                 bin_centers, univariate_bin_fr = convert_spike_time_to_fr(univariate_recovered_spike, TIME_BEFORE_CUE, TIME_AFTER_CUE, bin_width, stride, rate=True)
+#                 #Since we're using a bin width of 0.01, the firing rate returned is in Hz, and it might be 100Hz, which is higher
+#                 _, kilosort_bin_fr = convert_spike_time_to_fr(kilosort_computed_spike_time, TIME_BEFORE_CUE, TIME_AFTER_CUE, bin_width, stride, rate=True)
+#                 pearson_corr = pearson_fr_calculation(univariate_bin_fr, kilosort_bin_fr)
+#                 cur_threshold_pearson_corr.append(pearson_corr)
+
+#             print(f"Elapsed time: {time.time() - start_time} seconds")
+#             print(f"Threshold {cur_threshold} has a mean pearson correlation of {np.mean(cur_threshold_pearson_corr)} for neuron {cur_neuron_id}")
+#             pearson_corr_with_neuron[cur_threshold][cur_neuron_id] = np.mean(cur_threshold_pearson_corr)
+
+#         print(f"Elapsed time: {time.time() - start_time} seconds")
+#         print(f"Threshold {cur_threshold} has a mean pearson correlation of {np.mean(cur_threshold_pearson_corr)}")
+#         results[cur_threshold] = np.mean(cur_threshold_pearson_corr)
+#     return results, pearson_corr_with_neuron
+
+# def druckmann_correlation_calculation(computed_spike, kilosort_spike):
+#     # Both input should be the times of the spikes between -3 and +3 seconds
+#     precision_delta = 0.005  # 5ms
+
+#     # Calculate the number of spikes that are within +- 2.5ms of each other (since we need to double 5ms)
+#     coincidences_count = 0
+#     # print("computed spike", len(computed_spike))
+#     # print("kilosort spike", len(kilosort_spike))
+#     # print("computed spike", computed_spike)
+#     # print("kilosort spike", kilosort_spike)
+
+#     for spike in computed_spike:
+#         for real_spike in kilosort_spike:
+#             if abs(spike - real_spike) <= precision_delta/2:
+#                 coincidences_count += 1
+
+#     # Calculate the expected number of coincidences generated by a homogeneous poisson process with the same rate f as the spike train kilosort_spike
+#     real_fr = len(kilosort_spike)/6
+#     # probability_of_zero_spike_in_window = math.e ** (-1 * real_fr * precision_delta)
+#     # expected_coincidences = 1 - probability_of_zero_spike_in_window #This would include the case where there are 2 spikes, or 3 spikes, however, I would both count them as 1 coincidence
+#     expected_coincidences = 2 * real_fr * precision_delta * len(computed_spike)
+
+#     # print(f"coincidences_count: {coincidences_count}")
+#     # print(f"expected_coincidences: {expected_coincidences}")
+
+#     bottom = 0.5 * (len(computed_spike) + len(kilosort_spike))
+#     top = (coincidences_count - expected_coincidences)
+#     N = (1 - 2 * real_fr * precision_delta)
+#     # print(f"top: {top}")
+#     # print(f"bottom: {bottom}")
+#     # print(f"N: {N}")
+#     return top/(bottom * N)

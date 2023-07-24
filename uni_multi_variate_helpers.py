@@ -1,5 +1,5 @@
 import numpy as np
-from spike_raster_display import extract_single_neuron_spike_times_for_specific_trial, center_around_cue, sliding_histogram, extract_processed_neuron_raster
+from spike_extraction_helpers import get_neuron_spike_time_template_across_all_trials, center_around_cue, sliding_histogram, extract_processed_neuron_raster
 from raw_voltage import extractPeakChannel, getDataAndPlot, getMultipleTrialVoltage
 from matplotlib import pyplot as plt
 from scipy.signal import correlate
@@ -11,8 +11,71 @@ from scipy.io import loadmat
 import neo
 import quantities as pq
 from elephant.spike_train_correlation import spike_time_tiling_coefficient
-from extract_template import extract_template, return_utilized_channels, convert_spike_time_to_fr_multiple_trials
-from spike_raster_display import extract_trial_time_info, extract_single_neuron_spike_time_across_trials, center_around_cue, sliding_histogram, extract_processed_neuron_raster
+from spike_extraction_helpers import extract_trial_time_info, center_around_cue, sliding_histogram, extract_processed_neuron_raster
+import pywt
+
+
+def convert_spike_time_to_fr(spikeTimes, config, rate=True):
+    '''Input: list of spikeTimes
+    Output: firing rates using the defined bin_width and stride (which might be different from the original bim of 86 timestamps)'''
+    spikeTimes = np.array(spikeTimes)
+    # Use Yi's code to identify a firing rate based on a new window_size and stride
+    TIME_BEFORE_CUE = config['TIME_BEFORE_CUE']
+    TIME_AFTER_CUE = config['TIME_AFTER_CUE']
+    bin_width = config['bin_width']
+    stride = config['stride']
+
+    bin_centers, bin_fr = sliding_histogram(
+        spikeTimes, TIME_BEFORE_CUE, TIME_AFTER_CUE, bin_width, stride, rate=True)
+
+    return bin_centers, bin_fr
+
+
+def convert_spike_time_to_time_bin_count(kilosort_spike_time, trialId, config):
+    kilosort_spike_time = [(config['TIME_AFTER_CUE']+n) /
+                           (2*config['TIME_AFTER_CUE'])for n in kilosort_spike_time]
+
+    time_bins = np.zeros(
+        len(config['univariate_projection_stats'][trialId]['denoised_projection']))
+
+    for spike_time in kilosort_spike_time:
+        bin_index = int(spike_time * len(time_bins))
+        time_bins[bin_index] = 1
+    return time_bins
+
+
+def convert_spike_time_to_fr_multiple_trials(spikeTimes_multiple_trial, config, rate=True):
+    '''Input: list of trials of spiketimes, shape (num_trials, num_spiketimes)
+    Output: list of trials of fr, shape (num_trials, num_bins)
+    firing rates using the defined bin_width and stride (which might be different from the original bim of 86 timestamps)'''
+    final_bin_centers = []
+    final_bin_fr = []
+    for spike_time in spikeTimes_multiple_trial:
+        bin_centers, bin_fr = convert_spike_time_to_fr(
+            spike_time, config, rate=True)
+        final_bin_centers.append(bin_centers)
+        final_bin_fr.append(bin_fr)
+    return final_bin_centers, final_bin_fr
+
+
+def return_utilized_channels(template):
+    """Returns the channels that are utilized in the template (List)"""
+    for temp in template:
+        non_zero_indices = [i for i, num in enumerate(temp) if num != 0]
+        if non_zero_indices:
+            return non_zero_indices
+
+
+def extract_all_templates(config):
+    template_used_data_path = config['template_used_data_path']
+    template = np.load(template_used_data_path)
+    return template  # Should contain all 1000 templates
+
+
+def extract_template(config, templateId):
+    """Extracts the template from the template_used_data_path
+    (Returned object have shape (channel counts (383) X timestamps (82))"""
+    return config['all_templates'][templateId]
 
 
 def generate_spike_time_from_bin(spike_count_per_bin):
@@ -40,7 +103,7 @@ def multivariate(raw_voltage, template, utilized_channels):
         # print("utilizied_channels", utilized_channels)
         # print("raw_voltage[utilized_channels, bin*template.shape[0]:(bin+1)*template.shape[0]]",
         #   raw_voltage[utilized_channels, bin*template.shape[0]:(bin+1)*template.shape[0]].shape)
-        x = raw_voltage[utilized_channels, bin*template.shape[0]                        :(bin+1)*template.shape[0]].transpose().flatten()
+        x = raw_voltage[utilized_channels, bin*template.shape[0]:(bin+1)*template.shape[0]].transpose().flatten()
         y = template[:, utilized_channels].flatten()
         # x and y must first be converted into 82 x 383 martix, select only the utilized Channels then flattened
         multivariate = np.dot(x, y)
@@ -69,7 +132,7 @@ def multiple_trial_multivariate(raw_voltage, template, utilized_channels):
     return np.array(finalMultivariate)
 
 
-def univariate(raw_voltage, template):
+def univariate(raw_voltage, template, final_scaling_amplitude_template):
     """
     This function calculates normalized univariate analysis of raw voltage data using a template.
     """
@@ -81,11 +144,18 @@ def univariate(raw_voltage, template):
 
     # TODO: I should have only selected "utilized_channels" in the first place, but I did it later on in the code that it doesn't affect
     # The final output. But i should fix for clarity.
+
+    # Since I need to scale the template without knowing the magnitude to scale it by, I can only scale it by the average of the entire trial
+    # This is because the average of the entire trial should be the same as the average of the template, and therefore I can scale it by that
+    template_scale_factor = np.mean(final_scaling_amplitude_template)
+    print('template_scale_factor', template_scale_factor)
+    template = template * template_scale_factor
     for bin in range(int(totalNumBins)):
         current_bin_prediction = []
         # current_bin_voltage should have shape 383 X 82
         current_bin_voltage = raw_voltage[:, bin *
                                           template.shape[0]:(bin+1)*template.shape[0]]
+
         # print("current_bin_voltage", current_bin_voltage.shape)
         for channel in range(current_bin_voltage.shape[0]):
             x = current_bin_voltage[channel, :]
@@ -106,12 +176,13 @@ def univariate(raw_voltage, template):
     return np.array(finalUnivariate)
 
 
-def multiple_trial_univariate(raw_voltage, template):
+def multiple_trial_univariate(raw_voltage, template, final_scaling_amplitude_template):
     '''This would return the univariate projections for multiple designated trials, 
     when given a list of raw_voltage to compute'''
     finalUnivariate = []
     for trial in range(raw_voltage.shape[0]):
-        single_uni_projection = univariate(raw_voltage[trial], template)
+        single_uni_projection = univariate(
+            raw_voltage[trial], template, final_scaling_amplitude_template[trial])
         finalUnivariate.append(single_uni_projection)
     return np.array(finalUnivariate)
 
@@ -227,29 +298,36 @@ def get_uni_multi_kilosort_spikes_across_selected_trials(config):
 
     print("breakpoint 0")
     # 1. Extract the spike_times for kilosort for desired_trials
-    all_spike_times = extract_processed_neuron_raster(
-        raw_spike_data_path=raw_spike_data_path, neuron_identity_data_path=neuron_identity_data_path)
-    _, all_cue_times = extract_trial_time_info(trial_time_info_path)
-    temp_kilosort_spike_time = extract_single_neuron_spike_time_across_trials(
-        all_spike_times, all_cue_times, NEURON_ID)
+    all_spikes = extract_processed_neuron_raster(config)
+    _, all_cue_times = extract_trial_time_info(config)
+
+    # shape(num_trial, num_spikes_in a specific trial) containing the adjusted times of the spikes
+    temp_kilosort_spike_time, scaling_amplitude_template = get_neuron_spike_time_template_across_all_trials(
+        all_spikes, all_cue_times, NEURON_ID)
+
+    assert (len(temp_kilosort_spike_time) == len(all_cue_times)
+            == len(scaling_amplitude_template) == 323)
 
     # Only selecting the kilosort spike times for the desired trials
     final_kilosort_spike_time = [temp_kilosort_spike_time[i]
                                  for i in listOfDesiredTrials]
-    print("breakpoint 1")
+
+    final_scaling_amplitude_template = [
+        scaling_amplitude_template[i] for i in listOfDesiredTrials]
+
     # 2. Extracting the raw_voltage and templates for the desired trials
     raw_voltage_for_desired_trials = getMultipleTrialVoltage(
         listOfDesiredTrials, all_cue_times, raw_voltage_data_path, peakChannel)
 
-    # Identify the shape of the template used for the desired neuron
+    # # Identify the shape of the template used for the desired neuron
     cur_template = extract_template(
-        template_used_data_path=template_used_data_path, templateId=NEURON_ID)
+        config, templateId=NEURON_ID)
     utilized_channels = return_utilized_channels(cur_template)
 
     print("breakpoint 2")
     # 3. Use the raw_voltage and templates to calculate univariate and multivariate spike times
     univariate_projection = multiple_trial_univariate(
-        raw_voltage_for_desired_trials, cur_template)
+        raw_voltage_for_desired_trials, cur_template, final_scaling_amplitude_template)
     multivariate_projection = multiple_trial_multivariate(
         raw_voltage_for_desired_trials, cur_template, utilized_channels)
 
@@ -354,5 +432,119 @@ def plot_uni_multi_kilosort_spikes_across_all_trials(selected_trials, univariate
     # plt.legend()
     plt.suptitle(
         f'Raster Plot Comparison for {len(univariate_spike_time)} trials for Neuron {NEURON_ID} threshold: {threshold}')
+    plt.tight_layout()
+    plt.show()
+
+
+def get_univariate_projection_stats(config):
+
+    result = {}
+    for trial_idx in config["selected_trials"]:
+        result[trial_idx] = {}
+
+        # Should be shape (num_time_bins for 6 seconds, num_channels)
+        univariate_projection = config["selected_trials_spikes_fr_voltage"][trial_idx]["univariate_projection"]
+
+        # Identifying the utilized_channels
+        cur_template = extract_template(
+            config, templateId=config["NEURON_ID"])
+        utilized_channels = np.array(return_utilized_channels(cur_template))
+
+        # Shape (num_time_bins for 6 seconds, num_utilized_channels)
+        selected_univariate_projection = univariate_projection[:,
+                                                               utilized_channels]
+
+        positive_sum_per_trial = 0
+        negative_sum_per_trial = 0
+        for time_bin in selected_univariate_projection:
+            # Iterating over each time bin, and calculating the summation of all the positive numbers
+            for channel in time_bin:
+                if channel > 0:
+                    positive_sum_per_trial += channel
+                else:
+                    negative_sum_per_trial += channel
+        result[trial_idx]['positive_sum'] = positive_sum_per_trial
+        result[trial_idx]['negative_sum'] = negative_sum_per_trial
+
+        summation_univariate_projection = np.sum(univariate_projection, axis=1)
+        denoised_summation = pywt.threshold(summation_univariate_projection, value=np.std(
+            summation_univariate_projection), mode='soft')
+        result[trial_idx]['denoised_projection'] = denoised_summation
+        result[trial_idx]['summation_univariate_projection'] = summation_univariate_projection
+
+    return result
+
+
+def plot_univariate_projection_stats(config):
+
+    # List of channels
+    univariate_projection_stats = config['univariate_projection_stats']
+    trials = list(univariate_projection_stats.keys())
+    positions = list(range(len(trials)))
+
+    # Lists of metrics
+    positive_sum = [univariate_projection_stats[trial]
+                    ['positive_sum'] for trial in trials]
+    negative_sum = [univariate_projection_stats[trial]
+                    ['negative_sum'] for trial in trials]
+
+    # Create a figure and a set of subplots
+    fig, axs = plt.subplots(2, figsize=(5, 10))
+
+    # Plot the data
+    axs[0].bar(positions, positive_sum, color='blue')
+    axs[0].set_title('Positive Sum of all the positive projection values')
+    axs[0].set_ylabel('Value')
+    axs[0].set_xticks(positions)
+    axs[0].set_xticklabels(trials, rotation='vertical')
+
+    axs[1].bar(positions, negative_sum, color='orange')
+    axs[1].set_title('Negative Sum of all the positive projection values')
+    axs[1].set_ylabel('Value')
+    axs[1].set_xticks(positions)
+    axs[1].set_xticklabels(trials, rotation='vertical')
+
+    fig.suptitle(f'{config["NEURON_ID"]} {config["desired_trial_type_name"]}')
+    plt.show()
+
+
+def heatmap_univariate(config):
+    n = len(config["selected_trials"])  # number of subfigures
+    fig, axs = plt.subplots(n, 1, figsize=(3, n*3))
+
+    summation_heatmap_univariate = {}
+    for ax, trial_idx in zip(axs, config["selected_trials"]):
+        # shape should be (num_time_bins for 6 seconds, num_channels)
+        univariate_projection = config["selected_trials_spikes_fr_voltage"][trial_idx]["univariate_projection"]
+
+        # Identifying the utilized_channels
+        cur_template = extract_template(config, templateId=config["NEURON_ID"])
+        utilized_channels = np.array(return_utilized_channels(cur_template))
+        univariate_projection = univariate_projection[:, utilized_channels].transpose(
+        )
+
+        summation_univariate_projection = np.sum(univariate_projection, axis=0)
+        denoised_summation = pywt.threshold(summation_univariate_projection, value=np.std(
+            summation_univariate_projection), mode='soft')
+        summation_heatmap_univariate[trial_idx] = denoised_summation
+
+        img = ax.imshow(univariate_projection,
+                        interpolation='nearest', aspect='auto', cmap='seismic')
+
+        fig.colorbar(img, ax=ax)
+        ax.set_title(f'{trial_idx}')
+
+    plt.tight_layout()
+    plt.show()
+
+    fig, axs = plt.subplots(len(summation_heatmap_univariate), 1, figsize=(
+        5, len(summation_heatmap_univariate)*5))
+
+    fig, axs = plt.subplots(n, 1, figsize=(5, n*5))
+
+    for ax, trial_idx in zip(axs, summation_heatmap_univariate):
+        ax.plot(summation_heatmap_univariate[trial_idx])
+        ax.set_title(f'{trial_idx}')
+
     plt.tight_layout()
     plt.show()

@@ -1,4 +1,4 @@
-from spike_raster_display import *
+from spike_extraction_helpers import *
 from raw_voltage import *
 
 
